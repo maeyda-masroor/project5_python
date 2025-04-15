@@ -1,18 +1,22 @@
 import streamlit as st
 import hashlib
+import base64
 import json
 import os
+import re
 from cryptography.fernet import Fernet
 
-# Constants
-#create file to store data
-CREDENTIALS_FILE = "credentials.json"
-KEY_FILE = "secret.key"
+# ========================
+# 📁 FILE SETUP
+# ========================
+SECURE_DIR = ".secure"
+os.makedirs(SECURE_DIR, exist_ok=True)
+CREDENTIALS_FILE = os.path.join(SECURE_DIR, "credentials.json")
+KEY_FILE = os.path.join(SECURE_DIR, "secret.key")
+DATA_FILE = os.path.join(SECURE_DIR, "data.json")
 MAX_ATTEMPTS = 3
 
-# Load or create encryption key
 def load_key():
-    #open file in binary mode
     if os.path.exists(KEY_FILE):
         with open(KEY_FILE, "rb") as key_file:
             return key_file.read()
@@ -22,52 +26,84 @@ def load_key():
             key_file.write(key)
         return key
 
-# Encryption setup
-KEY = load_key()
-cipher = Fernet(KEY)
+fernet = Fernet(load_key())
 
-# Load credentials
+def hash_with_salt(password):
+    salt = os.urandom(16)
+    hashed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100000)
+    return base64.b64encode(salt + hashed).decode()
+
+def verify_password(stored, provided):
+    data = base64.b64decode(stored.encode())
+    salt, stored_hash = data[:16], data[16:]
+    new_hash = hashlib.pbkdf2_hmac("sha256", provided.encode(), salt, 100000)
+    return new_hash == stored_hash
+
+def is_strong_password(password):
+    return (
+        len(password) >= 8 and
+        re.search(r"[A-Z]", password) and
+        re.search(r"[a-z]", password) and
+        re.search(r"[0-9]", password) and
+        re.search(r"[!@#$%^&*(),.?\":{}|<>]", password)
+    )
+
+# ========================
 def load_credentials():
     if os.path.exists(CREDENTIALS_FILE):
         with open(CREDENTIALS_FILE, "r") as file:
             return json.load(file)
     return {}
 
-# Save credentials
 def save_credentials(credentials):
     with open(CREDENTIALS_FILE, "w") as file:
         json.dump(credentials, file, indent=4)
 
-# Hash passkey
-def hash_passkey(passkey):
-    return hashlib.sha256(passkey.encode()).hexdigest()
+def save_encrypted_data(username, encrypted_data):
+    data = {}
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            data = json.load(f)
+    data[username] = encrypted_data.decode()
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f)
 
-# Encrypt password
-#decode password
-def encrypt_password(password):
-    return cipher.encrypt(password.encode()).decode()
+def load_and_decrypt_data(username):
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            data = json.load(f)
+        if username in data:
+            encrypted = data[username].encode()
+            try:
+                return fernet.decrypt(encrypted).decode()
+            except:
+                return "Decryption failed."
+    return "No data found for this username."
 
-# Decrypt password
-#enocde 
-def decrypt_password(encrypted_password):
-    try:
-        return cipher.decrypt(encrypted_password.encode()).decode()
-    except:
-        return None
-
-# Initialize session state
+# ========================
+# 🧠 SESSION STATE INIT
+# ========================
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
-if "failed_attempts" not in st.session_state:
-    st.session_state.failed_attempts = 0
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
+if "failed_logins" not in st.session_state:
+    st.session_state.failed_logins = {}
+
+# ========================
+# 🌐 UI HEADER & LOGOUT
+# ========================
+st.title("Secure Login & Encrypted Data App")
+
+if st.session_state.logged_in:
+    if st.button("🚪 Logout"):
+        st.session_state.logged_in = False
+        st.session_state.current_user = None
+        st.success("Logged out successfully!")
+
+tabs = st.tabs(["Login", "Register", "Store & Retrieve Data", "View Stored Credentials"])
 
 credentials = load_credentials()
-
-# UI: Tabs for Login / Register / Data Storage
-tabs = st.tabs(["Login", "Register", "Store & Retrieve Data","view store data"])
-
 
 with tabs[0]:
     st.subheader("Login")
@@ -75,108 +111,69 @@ with tabs[0]:
     password = st.text_input("Password", type="password")
 
     if st.button("Login"):
-        if email in credentials:
-            stored = credentials[email]
-            decrypted_pw = decrypt_password(stored["encrypted_text"])
-
-            if decrypted_pw == password:
+        attempts = st.session_state.failed_logins.get(email, 0)
+        if attempts >= MAX_ATTEMPTS:
+            st.warning("Too many failed attempts.")
+        elif email in credentials:
+            if verify_password(credentials[email]["passkey"], password):
                 st.success(f"Welcome back, {email}!")
                 st.session_state.logged_in = True
-                st.session_state.failed_attempts = 0
                 st.session_state.current_user = email
+                st.session_state.failed_logins[email] = 0
             else:
-                st.session_state.failed_attempts += 1
-                st.error(" Incorrect password")
+                st.session_state.failed_logins[email] = attempts + 1
+                st.error("Incorrect password.")
         else:
-            st.error("⚠User not found")
+            st.error("User not found.")
 
-        if st.session_state.failed_attempts >= MAX_ATTEMPTS:
-            st.warning(" Too many failed attempts. Please try again later.")
-
-# 📝 REGISTRATION TAB
+# ========================
+# 📝 REGISTER TAB
+# ========================
 with tabs[1]:
     st.subheader("Register")
     new_email = st.text_input("New Email")
-    new_password = st.text_input(" New Password", type="password")
+    new_password = st.text_input("New Password", type="password")
 
     if st.button("Register"):
         if new_email in credentials:
-            st.warning("User already exists")
-        elif new_email and new_password:
-            hashed = hash_passkey(new_password)
-            encrypted = encrypt_password(new_password)
-            credentials[new_email] = {
-                "encrypted_text": encrypted,
-                "passkey": hashed
-            }
-            save_credentials(credentials)
-            st.success("User registered successfully!")
+            st.warning("User already exists.")
+        elif not is_strong_password(new_password):
+            st.error("Password must include uppercase, lowercase, number, symbol & be 8+ characters.")
         else:
-            st.error("Please fill both fields")
+            credentials[new_email] = {"passkey": hash_with_salt(new_password)}
+            save_credentials(credentials)
+            st.success("Registered successfully!")
 
-# 📦 STORE / RETRIEVE DATA TAB
+# ========================
+# =======================
 with tabs[2]:
     if not st.session_state.logged_in:
-        st.warning("Please login first to store/retrieve data.")
+        st.warning("Please login to continue.")
     else:
-        st.subheader("Secure Data Storage")
-        user_data = st.text_area("Enter data to store")
-        user_passkey = st.text_input("Enter passkey to encrypt", type="password")
+        st.subheader("Store or Retrieve Secret Data")
+        username = st.text_input("Username")
+        secret = st.text_input("Enter secret")
 
         if st.button("Encrypt & Save"):
-            if user_data and user_passkey:
-                hashed = hash_passkey(user_passkey)
-                encrypted = cipher.encrypt(user_data.encode()).decode()
-                user_key = st.session_state.current_user + "_data"
-
-                credentials[user_key] = {
-                    "encrypted_text": encrypted,
-                    "passkey": hashed
-                }
-                save_credentials(credentials)
-                st.success(" Data stored securely!")
-            else:
-                st.error("⚠Provide both data and passkey")
-
-        st.subheader(" Retrieve Stored Data")
-        encrypted_input = st.text_area("Paste your encrypted text here")
-        passkey_input = st.text_input("Enter your passkey to decrypt", type="password")
+            if username and secret:
+                encrypted = fernet.encrypt(secret.encode())
+                save_encrypted_data(username, encrypted)
+                st.success("✅ Data saved securely!")
 
         if st.button("Decrypt Data"):
-            if encrypted_input and passkey_input:
-                hashed_input = hash_passkey(passkey_input)
-                user_key = st.session_state.current_user + "_data"
-                entry = credentials.get(user_key)
-
-                if entry and entry["encrypted_text"] == encrypted_input and entry["passkey"] == hashed_input:
-                    try:
-                        decrypted = cipher.decrypt(encrypted_input.encode()).decode()
-                        st.success(f"Decrypted Data: {decrypted}")
-                    except:
-                        st.error("⚠ Failed to decrypt stored data.")
-                else:
-                    st.warning("Invalid passkey or encrypted text.")
-            else:
-                st.error("⚠Please provide both fields")
+            if username:
+                result = load_and_decrypt_data(username)
+                st.info(f"Decrypted Message: {result}")
 
 with tabs[3]:
-    st.subheader(" view store data")
-
+    st.subheader("Stored Credentials")
     if not st.session_state.logged_in:
-        st.warning("Please login to view your data.")
+        st.warning("Login required.")
     else:
-        user_key = st.session_state.current_user + "_data"
-        entry = credentials.get(user_key)
-
-        if entry:
-            st.markdown("### 🔒 Encrypted Data:")
-            st.code(entry["encrypted_text"], language="text")
-            st.markdown("### 🧾 Stored Hashed Passkey:")
-            st.code(entry["passkey"], language="text")
+        email = st.session_state.current_user
+        data = credentials.get(email)
+        if data:
+            st.markdown(f"**Email:** `{email}`")
+            st.code(data['passkey'], language="text")
         else:
-            st.info("No data stored for this user.")
-
-#python3 -m venv cryptoenv
-
-#maeydahmasroor@Maeydahs-MacBook-Pro ~ % source cryptoenv/bin/activate
-
+            st.info("No credentials found.")
