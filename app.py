@@ -5,12 +5,14 @@ import os
 from cryptography.fernet import Fernet
 
 # Constants
+#create file to store data
 CREDENTIALS_FILE = "credentials.json"
 KEY_FILE = "secret.key"
 MAX_ATTEMPTS = 3
 
 # Load or create encryption key
 def load_key():
+    #open file in binary mode
     if os.path.exists(KEY_FILE):
         with open(KEY_FILE, "rb") as key_file:
             return key_file.read()
@@ -41,10 +43,12 @@ def hash_passkey(passkey):
     return hashlib.sha256(passkey.encode()).hexdigest()
 
 # Encrypt password
+#decode password
 def encrypt_password(password):
     return cipher.encrypt(password.encode()).decode()
 
 # Decrypt password
+#enocde 
 def decrypt_password(encrypted_password):
     try:
         return cipher.decrypt(encrypted_password.encode()).decode()
